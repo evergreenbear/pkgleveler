@@ -1,0 +1,96 @@
+#!/bin/bash
+
+set +e
+
+##
+## pkgleveler: remove packages not in an os-image-builder packageset
+##
+
+## BASELINE:
+# this script wll eventually be a part of my own install script;
+# - automatically partition a given drive
+# - follow same steps as os-image-builder installscript w/ some liberties from calamares to create a workable install [make compatible w/ JSON ignition install of immutable openSUSE?]
+# - this part of the script follows, turning a DE/live iso into a minimal install
+# - then install my own packages & configs (wm, tailscale, etc) [make compatible with combustion for full ignition stack support?]
+
+## ASAP TODO:
+# - RESUME work on acquirePackagesetis
+# - move sanityCheck to main()? assess how chonky the function gets
+
+## OUTLINE:
+# - retrieve packagesets from OpenMandrivaSoftware/os-image-builder/packagesets
+# - parse given packagesets, check for sanity
+# - make an array with items in all specified packagesets, work through 'rpm -qa' to determine what packages are not in them
+# - remove those packages
+# - make argument syntax similar to that of os-image-builder; check its README
+## ADDITIONAL:
+# - --remove-all-in / --remove-all-not-in [packageset]? dual utility
+# - allow exclusion of specified packages
+# - figure out how best to do argument construction & parsing for all of this
+# - create arg to allow removing packageset-#include'd sets as well (--packageset-recursive or --recursive maybe?)
+# - url flag to use your own url?
+
+# https://gist.github.com/dotike/8257326
+shout() { echo "$0: $*" >&2; }
+die() { shout "$*"; exit 111; }
+try() { "$@" || die "cannot $*"; }
+
+# https://stackoverflow.com/a/8574392
+elementIn () {
+  local e match="$1"
+  shift
+  for e; do [[ "$e" == "$match" ]] && return 0; done
+  return 1
+}
+
+sanityCheck() {
+	# do this better, like way better
+	for dependency in "git" "jq"; do
+		if ! rpm -q "$dependency" --quiet; then
+			die "$dependency  must be installed!"
+		fi
+	done
+}
+
+acquirePackagesets() {
+	repoResponse="$(curl -s https://api.github.com/repos/OpenMandrivaSoftware/os-image-builder/contents/packagesets)"
+	[[ "$(echo $repoResponse | jq -r '.message' 2>/dev/null)" == "Not Found" ]] && die "github repository OpenMandrivaSoftware/os-image-builer: directory packagesets/ does not exist"
+	
+	packagesetsAvail=("$(echo $repoResponse | jq -r '.[].name')")
+	#for set in "${packagesetsAvail[@]}"; do echo "$set"; done
+}
+
+parseArgs() {
+	# parse behavioral arguments, e.g. --recursive-removal or --rm-all-in
+	#case "$@" in
+	#	"") true; shift;;
+	#esac
+
+	# now parse the rest [TODO: implement a check for if it contains a '-' or '--'? behavioral args should not end up here]
+	## for now, this should only have names of pkgLists
+	for arg in "$@"; do
+		# do this, or check if the link to the file exists?
+		#if ! grep -Fxq "$arg" "${packagesetsAvail[*]}"; then die "$arg is not a valid packageset"; fi
+		if ! elementIn "$arg.pkgs" "${packagesetsAvail[@]}"; then die "$arg is not a valid packageset"; fi
+	
+		readarray -t pkgQueue < $(curl -fLO https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/"$".pkgs)
+		for pkg in "${pkgQueue[@]}"; do
+			if [[ "$pkg" == "#include"* ]]; then
+				echo "packageset $arg.pkgs contains an include statement"
+			elif [[ "$pkg" == "LIB("* ]]; then
+				# can `dnf se` be used programmatically in any effective way?
+				# maybe query pkgs.org (or better, OMV's own abf or repos) and grep for the term used in LIB
+				echo "packageset $arg.pkgs contains a LIB statement, resolving to a package..."
+			fi
+		done
+	done
+}
+
+main() {
+	# our functional queue
+	sanityCheck
+	acquirePackagesets "$@"
+	parseArgs "$@"
+}
+
+main "$@"
