@@ -43,6 +43,10 @@ elementIn () {
   return 1
 }
 
+usage() {
+	echo "pkgleveler! a first step towards omvInstall"
+}
+
 sanityCheck() {
 	# do this better, like way better
 	for dependency in "git" "jq"; do
@@ -57,10 +61,11 @@ acquirePackagesets() {
 	[[ "$(echo $repoResponse | jq -r '.message' 2>/dev/null)" == "Not Found" ]] && die "github repository OpenMandrivaSoftware/os-image-builer: directory packagesets/ does not exist"
 	
 	packagesetsAvail=("$(echo $repoResponse | jq -r '.[].name')")
-	#for set in "${packagesetsAvail[@]}"; do echo "$set"; done
+	for set in "${packagesetsAvail[@]}"; do echo "$set"; done
 }
 
 parseArgs() {
+	[[ "$#" -lt 1 ]] && usage && die "at least one argument is needed; see above"
 	# parse behavioral arguments, e.g. --recursive-removal or --rm-all-in
 	#case "$@" in
 	#	"") true; shift;;
@@ -71,9 +76,12 @@ parseArgs() {
 	for arg in "$@"; do
 		# do this, or check if the link to the file exists?
 		#if ! grep -Fxq "$arg" "${packagesetsAvail[*]}"; then die "$arg is not a valid packageset"; fi
-		if ! elementIn "$arg.pkgs" "${packagesetsAvail[@]}"; then die "$arg is not a valid packageset"; fi
-	
-		readarray -t pkgQueue < $(curl -fLO https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/"$".pkgs)
+		[[ ! "${packagesetsAvail[@]}" =~ "$arg" ]] && die "$arg.pkgs is not a valid packageset"
+
+		#pkgsetCurl='curl -fLO https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/"$arg".pkgs'
+		pkgsetCurl="https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/$arg.pkgs"
+		echo "curl command is $pkgsetCurl"
+		readarray -t pkgQueue < $(curl -fLO "$pkgsetCurl")
 		for pkg in "${pkgQueue[@]}"; do
 			if [[ "$pkg" == "#include"* ]]; then
 				echo "packageset $arg.pkgs contains an include statement"
