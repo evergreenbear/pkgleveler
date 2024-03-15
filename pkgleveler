@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set +e
-
 ##
 ## pkgleveler: remove packages not in an os-image-builder packageset
 ##
@@ -28,77 +26,133 @@ set +e
 # - allow exclusion of specified packages
 # - figure out how best to do argument construction & parsing for all of this
 # - create arg to allow removing packageset-#include'd sets as well (--packageset-recursive or --recursive maybe?)
-# - url flag to use your own url?
+
 
 # https://gist.github.com/dotike/8257326
 shout() { echo "$0: $*" >&2; }
 die() { shout "$*"; exit 111; }
 try() { "$@" || die "cannot $*"; }
 
-# https://stackoverflow.com/a/8574392
-elementIn () {
-  local e match="$1"
-  shift
-  for e; do [[ "$e" == "$match" ]] && return 0; done
-  return 1
+usage() {
+        echo "pkgleveler! a first step towards omvInstall"
 }
 
-usage() {
-	echo "pkgleveler! a first step towards omvInstall"
+warn() {
+        # TODO: expand this
+        echo "WARNING: $1"
 }
 
 sanityCheck() {
-	# do this better, like way better
-	for dependency in "git" "jq"; do
-		if ! rpm -q "$dependency" --quiet; then
-			die "$dependency  must be installed!"
-		fi
-	done
+        # do this better, like way better
+        for dependency in "git" "jq"; do
+                if ! rpm -q "$dependency" --quiet; then
+                        die "$dependency  must be installed!"
+                fi
+        done
 }
 
 acquirePackagesets() {
-	repoResponse="$(curl -s https://api.github.com/repos/OpenMandrivaSoftware/os-image-builder/contents/packagesets)"
-	[[ "$(echo $repoResponse | jq -r '.message' 2>/dev/null)" == "Not Found" ]] && die "github repository OpenMandrivaSoftware/os-image-builer: directory packagesets/ does not exist"
-	
-	packagesetsAvail=("$(echo $repoResponse | jq -r '.[].name')")
-	for set in "${packagesetsAvail[@]}"; do echo "$set"; done
+        if rpm -qa | grep sudo 2>&1 >/dev/null; then
+                su="sudo"
+        else
+                su="su -c"
+        fi
+        repoResponse=$(curl -s https://api.github.com/repos/OpenMandrivaSoftware/os-image-builder/contents/packagesets)
+        [[ "$(echo "$repoResponse" | jq -r '.message' 2>/dev/null)" == "Not Found" ]] && die "GitHub repository OpenMandrivaSoftware/os-image-builder: directory packagesets/ does not exist"
+
+        packagesetsAvail=($(echo "$repoResponse" | jq -r '.[].name' | grep '\.pkgs$'))
+        for set in "${packagesetsAvail[@]}"; do
+        [[ ! "$set" == *".pkgs" ]] && die "set $set is not in the form of .pkgs; failing for safety"
+        done
 }
 
-parseArgs() {
-	[[ "$#" -lt 1 ]] && usage && die "at least one argument is needed; see above"
-	# parse behavioral arguments, e.g. --recursive-removal or --rm-all-in
-	#case "$@" in
-	#	"") true; shift;;
-	#esac
+prepQueue() {
+        [[ "$#" -lt 1 ]] && usage && die "at least one argument is needed; see above"
+        pkgsetURL="https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets"
+        mkPkgQueue="readarray -t pkgQueue <<<\$(curl -s \$pkgsetURL/\$arg.pkgs | grep -v '^//' | grep -v '^#include' | grep -v '^LIB' | grep -v '^distro-release')"
+        # parse behavioral arguments, e.g. --recursive-removal or --rm-all-in
+        for arg in "$@"; do
+                case "$arg" in
+                        "--not-in") pkgRmNotIn=true; shift ;;
+                        "--follow-includes") mkPkgQueue=${mkPkgQueue//"| grep -v '^#include'"/}; shift ;;
+                        "--include-lib") mkPkgQueue=${mkPkgQueue//"| grep -v '^LIB'"/}; shift ;;
+                        "--include-distropkgs") mkPkgQueue=${mkPkgQueue//"| grep -v '^distro-release'"/}; shift ;;
+                        "--"*) usage; die "unknown behavioral argument '$arg'" ;;
+                esac
+        done
+        # now parse the rest [TODO: implement a check for if it contains a '-' or '--'? behavioral args should not end up here]
+        ## for now, this should only have names of pkgLists
+        for arg in "$@"; do
+                #if ! grep -Fxq "$arg" "${packagesetsAvail[*]}"; then die "$arg is not a valid packageset"; fi
+                [[ ! "${packagesetsAvail[@]}" =~ "$arg" ]] && die "$arg.pkgs is not a valid packageset"
+                [[ "$arg" == "core" ]] && warn "pkgset 'core' is crucial to system function. Removing it is probably not what you want to do."
 
-	# now parse the rest [TODO: implement a check for if it contains a '-' or '--'? behavioral args should not end up here]
-	## for now, this should only have names of pkgLists
-	for arg in "$@"; do
-		# do this, or check if the link to the file exists?
-		#if ! grep -Fxq "$arg" "${packagesetsAvail[*]}"; then die "$arg is not a valid packageset"; fi
-		[[ ! "${packagesetsAvail[@]}" =~ "$arg" ]] && die "$arg.pkgs is not a valid packageset"
+                # build the pkgQueue array using the final iteration
+                eval "$mkPkgQueue"
 
-		#pkgsetCurl='curl -fLO https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/"$arg".pkgs'
-		pkgsetCurl="https://raw.githubusercontent.com/OpenMandrivaSoftware/os-image-builder/master/packagesets/$arg.pkgs"
-		echo "curl command is $pkgsetCurl"
-		readarray -t pkgQueue < $(curl -fLO "$pkgsetCurl")
-		for pkg in "${pkgQueue[@]}"; do
-			if [[ "$pkg" == "#include"* ]]; then
-				echo "packageset $arg.pkgs contains an include statement"
-			elif [[ "$pkg" == "LIB("* ]]; then
-				# can `dnf se` be used programmatically in any effective way?
-				# maybe query pkgs.org (or better, OMV's own abf or repos) and grep for the term used in LIB
-				echo "packageset $arg.pkgs contains a LIB statement, resolving to a package..."
-			fi
-		done
-	done
+                while true; do
+                        hasInclude=false
+                        for pkg in "${!pkgQueue[@]}"; do
+                                [[ "${pkgQueue[pkg]}" == "distro-release-theme" ]] && unset 'pkgQueue[$pkg]' && pkgQueue=("${pkgQueue[@]}")
+                                case "${pkgQueue[pkg]}" in
+                                        "#include"*)
+                                                #if "$pkgFollowIncludes" 2>/dev/null; then
+                                                        pkgInclude="${pkgQueue[pkg]//#include \"}"
+                                                        pkgInclude="${pkgInclude%\"}"
+                                                        if ! curl -s "$pkgsetURL"/"$pkgInclude" 2>&1 > /dev/null; then 
+                                                                die "packageset $pkgInclude is included but does not exist"
+                                                        else
+                                                                readarray -t newPkgsArr <<<$(curl -s "$pkgsetURL"/"$pkgInclude")
+                                                                unset 'pkgQueue[$pkg]'
+                                                                pkgQueue=("${newPkgsArr[@]}" "${pkgQueue[@]}")
+                                                                pkgQueue=("${pkgQueue[@]}")
+                                                                hasInclude=true; continue
+                                                        fi
+                                                #fi
+                                                        ;;
+                                        "LIB"*)
+                                                # convert 'LIB(' to 'lib64', then remove the trailing ')',
+                                                # modifying the array item in place
+                                                pkgQueue[$pkg]="${pkgQueue[$pkg]/LIB\(/lib64}"
+                                                pkgQueue[$pkg]="${pkgQueue[$pkg]%)}"
+                                                ;;
+                                esac
+                        done
+
+                        if ! "$hasInclude"; then break; fi
+                done
+                if [[ ! "$(curl -s "$pkgsetURL"/"$arg".post)" == "404: Not Found" ]]; then
+                        cat <<- EOF
+                        Packageset $arg has a post-install script, which is:
+
+                        $(curl -s "$pkgsetURL"/"$arg".post)
+
+                        Changes could have been made to the system for packages that no longer exist (but we don't detect for that).
+                        Consider reversing any changes made that may be sticking around on the system unnecessarily.
+                        EOF
+                fi
+        done
+}
+
+rmPkgs() {
+                if "$pkgRmNotIn" 2>/dev/null; then
+                        # remove all the packages not in pkgQueue
+                        echo "$(rpm -qa | wc -l) packages are installed, and ? will be removed"
+                else
+                        # remove all the packages which are in pkgQueue
+                                echo "$(rpm -qa | wc -l) packages are installed, and ${#pkgQueue[@]} will be removed"
+                                read -p "does this sound okay? (Y/n)  " confirmRm
+                                [[ ! ${confirmRm,,} == "y" ]] && die "aborted"
+                                "$su" dnf rm ${pkgQueue[*]}
+                fi
 }
 
 main() {
-	# our functional queue
-	sanityCheck
-	acquirePackagesets "$@"
-	parseArgs "$@"
+        # our functional queue
+        sanityCheck
+        acquirePackagesets "$@"
+        prepQueue "$@"
+        rmPkgs
 }
 
 main "$@"
