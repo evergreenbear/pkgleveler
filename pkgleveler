@@ -138,6 +138,16 @@ rmPkgs() {
                 if "$pkgRmNotIn" 2>/dev/null; then
                         # remove all the packages not in pkgQueue
                         echo "$(rpm -qa | wc -l) packages are installed, and ? will be removed"
+                        readarray -t pkgsInstalled <<<$(rpm -qa)
+                        for i in "${pkgsInstalled[@]}"; do echo "installed pkg $i"; done
+
+                        "$su" dnf shell <<- EOF
+                        rm "${pkgsInstalled[*]}"
+                        in "${pkgQueue[*]}"
+                        run
+                        y
+                        EOF
+
                 else
                         # remove all the packages which are in pkgQueue
                                 echo "$(rpm -qa | wc -l) packages are installed, and ${#pkgQueue[@]} will be removed"
